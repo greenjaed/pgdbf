@@ -14,7 +14,7 @@
 /* You should have received a copy of the GNU General Public License     */
 /* along with this program.  If not, see <http://www.gnu.org/licenses/>. */
 
-#include <config.h>
+//#include <config.h>
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
@@ -24,11 +24,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-
+#include "wingetopt.h"
+#include "asprintf.h"
 #include "pgdbf.h"
 
 #define STANDARDOPTS "cCdDeEhm:nNpPqQtTuU"
@@ -52,20 +49,6 @@ int main(int argc, char **argv) {
                                     * array */
     int            fieldnum;       /* The current field beind processed */
     uint8_t        terminator;     /* Testing for terminator bytes */
-
-    /* Describing the memo file */
-    MEMOHEADER  *memoheader;
-    char        *memofilename = NULL;
-    int          memofd;
-    struct stat  memostat;
-    int32_t      memoblocknumber;
-    int          memofileisdbase3 = 0;
-
-    void        *memomap = NULL;     /* Pointer to the mmap of the memo file */
-    char        *memorecord;         /* Pointer to the current memo block */
-    size_t       memoblocksize = 0;  /* The length of each memo block */
-    size_t       memofilesize;
-    size_t       memorecordoffset;
 
     /* Processing and misc */
     char *inputbuffer;
@@ -153,9 +136,6 @@ int main(int argc, char **argv) {
         case 'E':
             optuseifexists = 0;
             break;
-        case 'm':
-            memofilename = optarg;
-            break;
         case 'n':
             optnumericasnumeric = 1;
             break;
@@ -211,9 +191,9 @@ int main(int argc, char **argv) {
     if(optexitcode != -1) {
         printf(
 #if defined(HAVE_ICONV)
-               "Usage: %s [-cCdDeEhtTuU] [-s encoding] [-m memofilename] filename [indexcolumn ...]\n"
+               "Usage: %s [-cCdDeEhtTuU] [-s encoding] filename [indexcolumn ...]\n"
 #else
-               "Usage: %s [-cCdDeEhtTuU] [-m memofilename] filename [indexcolumn ...]\n"
+               "Usage: %s [-cCdDeEhtTuU] filename [indexcolumn ...]\n"
 #endif
                "Convert the named XBase file into PostgreSQL format\n"
                "\n"
@@ -224,7 +204,6 @@ int main(int argc, char **argv) {
                "  -e  use 'IF EXISTS' when dropping tables (PostgreSQL 8.2+) (default)\n"
                "  -E  do not use 'IF EXISTS' when dropping tables (PostgreSQL 8.1 and older)\n"
                "  -h  print this message and exit\n"
-               "  -m  the name of the associated memo file (if necessary)\n"
                "  -n  use type 'NUMERIC' for NUMERIC fields (default)\n"
                "  -N  use type 'TEXT' for NUMERIC fields\n"
                "  -p  show a progress bar during processing\n"
@@ -248,7 +227,7 @@ int main(int argc, char **argv) {
                "License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>\n"
                "This is free software: you are free to change and redistribute it.\n"
                "There is NO WARRANTY, to the extent permitted by law.\n"
-               "Report bugs to <%s>\n", PACKAGE, PACKAGE_STRING, PACKAGE_BUGREPORT);
+               "Report bugs to <%s>\n", "pgdbf", "pgdbf", "your local administrator");
         exit(optexitcode);
     }
 
@@ -389,41 +368,6 @@ int main(int argc, char **argv) {
         exitwitherror("At an unexpected offset in the DBF file", 0);
     }
 
-    /* Open the given memofile */
-    if(memofilename != NULL) {
-        memofd = open(memofilename, O_RDONLY);
-        if(memofd == -1) {
-            exitwitherror("Unable to open the memofile", 1);
-        }
-        if(fstat(memofd, &memostat) == -1) {
-            exitwitherror("Unable to fstat the memofile", 1);
-        }
-        memofilesize = memostat.st_size;
-        memomap = mmap(NULL, memofilesize, PROT_READ, MAP_PRIVATE, memofd, 0);
-        if(memomap == MAP_FAILED) {
-            exitwitherror("Unable to mmap the memofile", 1);
-        }
-        /* Rudimentary error checking. Make sure the "nextblock" field of
-           the memofile's header isn't negative because that would be
-           impossible. */
-        memoheader = (MEMOHEADER*) memomap;
-        memofileisdbase3 = dbfheader.signature == (int8_t) 0x83;
-        if(memofileisdbase3) {
-            memoblocknumber = slittleint32_t(memoheader->nextblock);
-        } else {
-            memoblocknumber = sbigint32_t(memoheader->nextblock);
-        }
-        if(memoblocknumber < 0) {
-            exitwitherror("The next memofile block is negative. The specified "
-                          "memofile probably isn't really a memofile.", 0);
-        }
-        if(memofileisdbase3) {
-            memoblocksize = 512;
-        } else {
-            memoblocksize = (size_t) sbigint16_t(memoheader->blocksize);
-        }
-    }
-
     /* Encapsulate the whole process in a transaction */
     if(optusetransaction) {
         printf("BEGIN;\n");
@@ -559,21 +503,6 @@ int main(int argc, char **argv) {
             if(optusecreatetable) printf("BOOLEAN");
             break;
         case 'M':
-            if(memofilename == NULL) {
-                printf("\n");
-                fprintf(stderr, "Table %s has memo fields, but couldn't open the related memo file\n", tablename);
-                exit(EXIT_FAILURE);
-            }
-            if(optusecreatetable) printf("TEXT");
-            /* Decide whether to use numeric or packed int memo block
-             * number */
-            if(fields[fieldnum].length == 4) {
-                pgfields[fieldnum].memonumbering = PACKEDMEMOSTYLE;
-            } else if (fields[fieldnum].length == 10) {
-                pgfields[fieldnum].memonumbering = NUMERICMEMOSTYLE;
-            } else {
-                exitwitherror("Unknown memo record number style", 0);
-            }
             break;
         case 'N':
             if(optusecreatetable) {
@@ -705,34 +634,6 @@ int main(int argc, char **argv) {
                     }
                     break;
                 case 'M':
-                    /* Memos */
-                    if(pgfields[fieldnum].memonumbering == PACKEDMEMOSTYLE) {
-                        memoblocknumber = slittleint32_t(bufoffset);
-                    } else {
-                        memoblocknumber = 0;
-                        s = bufoffset;
-                        for(i = 0; i < 10; i++) {
-                            if(*s && *s != 32) {
-                                /* I'm unaware of any non-ASCII
-                                 * implementation of XBase. */
-                                memoblocknumber = memoblocknumber * 10 + *s - '0';
-                            }
-                            s++;
-                        }
-                    }
-                    if(memoblocknumber) {
-                        memorecordoffset = memoblocksize * memoblocknumber;
-                        if(memorecordoffset >= memofilesize) {
-                            exitwitherror("A memo record past the end of the memofile was requested", 0);
-                        }
-                        memorecord = memomap + memorecordoffset;
-                        if(memofileisdbase3) {
-                            t = strchr(memorecord, 0x1A);
-                            safeprintbuf(memorecord, t - memorecord);
-                        } else {
-                            safeprintbuf(memorecord + 8, sbigint32_t(memorecord + 4));
-                        }
-                    }
                     break;
                 case 'F':
                 case 'N':
@@ -822,12 +723,6 @@ int main(int argc, char **argv) {
     }
     free(pgfields);
     fclose(dbffile);
-    if(memomap != NULL) {
-        if(munmap(memomap, memostat.st_size) == -1) {
-            exitwitherror("Unable to munmap the memofile", 1);
-        }
-        close(memofd);
-    }
 
 #if defined(HAVE_ICONV)
     if(conv_desc != NULL) {

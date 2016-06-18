@@ -19,7 +19,6 @@
  * than 2GB. FreeBSD and OS X handle large files by default. */
 #define _FILE_OFFSET_BITS 64
 
-#include <config.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
